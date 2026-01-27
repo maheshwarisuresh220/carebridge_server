@@ -5,8 +5,6 @@ import serviceAccountKey from '@/serviceAccountKey.json';
 // --- 1. INITIALIZE FIREBASE ADMIN (Server-Side) ---
 if (!admin.apps.length) {
   try {
-    // Ensure 'serviceAccountKey.json' is in your root folder (same level as 'app' or 'src')
-    // or use environment variables for better security.
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccountKey as admin.ServiceAccount),
     });
@@ -22,7 +20,7 @@ const getDb = () => {
 
 export async function POST(request: Request) {
   try {
-    // 1. Parse Data from Frontend (or IoT Device)
+    // 1. Parse Data from Frontend
     const { to, type, patientName, extraData } = await request.json();
 
     console.log(`[API] Processing Alert: ${type} for ${patientName}`);
@@ -43,34 +41,35 @@ export async function POST(request: Request) {
 
     switch (type) {
       case 'FALL':
-        templateName = "fall_detected_alert";
+        // Ensure this name matches EXACTLY with your Meta Dashboard
+        templateName = "fall_detected_alert"; 
         parameters = [
-          { type: "text", text: patientName },           // {{patient_name}}
-          { type: "text", text: currentTime },           // {{time}}
-          { type: "text", text: extraData || "Home" }    // {{location}}
+          { type: "text", text: patientName },           // {{1}} Patient Name
+          { type: "text", text: currentTime },           // {{2}} Time
+          { type: "text", text: extraData || "Home" }    // {{3}} Location
         ];
         break;
 
       case 'SOS':
         templateName = "sos_emergency_alert";
         parameters = [
-          { type: "text", text: patientName },           
-          { type: "text", text: currentTime },           
-          { type: "text", text: extraData || "Unknown Location" } 
+          { type: "text", text: patientName },           // {{1}} Patient Name
+          { type: "text", text: currentTime },           // {{2}} Time
+          { type: "text", text: extraData || "Unknown Location" } // {{3}} Location
         ];
         break;
 
       case 'MEDS':
         templateName = "medication_reminder";
         parameters = [
-          { type: "text", text: patientName },           
-          { type: "text", text: extraData }              // Medicine Details
+          { type: "text", text: patientName },           // {{1}} Patient Name
+          { type: "text", text: extraData || "Your Medicine" } // {{2}} Medicine Details
         ];
         break;
 
-     default:
-        // Fallback for custom reminders
-        templateName = "carebridge_alert"; 
+      default:
+        // Fallback if an unknown type is sent
+        templateName = "carebridge_alert"; // Ensure you have a generic template or reuse one
         parameters = [
           { type: "text", text: patientName },
           { type: "text", text: extraData || "Please check the app." }
@@ -79,11 +78,11 @@ export async function POST(request: Request) {
 
     // 4. PREPARE: Send WhatsApp via Meta Cloud API
     const metaPromise = fetch(
-      `https://graph.facebook.com/v22.0/${process.env.META_PHONE_ID}/messages`,
+      `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
       {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${process.env.META_TOKEN}`,
+          'Authorization': `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -115,7 +114,7 @@ export async function POST(request: Request) {
         });
     }
 
-    // 6. EXECUTE BOTH (Parallel Execution for Speed)
+    // 6. EXECUTE BOTH
     const [metaResult] = await Promise.all([metaPromise, firebasePromise]);
 
     // 7. Check Meta Response for Errors
