@@ -1,46 +1,134 @@
 import { NextResponse } from 'next/server';
-import twilio from 'twilio';
 import * as admin from 'firebase-admin';
-import serviceAccount from '@/serviceAccountKey.json'; 
+import serviceAccountKey from '@/serviceAccountKey.json';
 
-// 1. INIT FIREBASE
+// --- 1. INITIALIZE FIREBASE ADMIN (Server-Side) ---
 if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount as admin.ServiceAccount),
-  });
+  try {
+    // Ensure 'serviceAccountKey.json' is in your root folder (same level as 'app' or 'src')
+    // or use environment variables for better security.
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccountKey as admin.ServiceAccount),
+    });
+  } catch (error) {
+    console.error("⚠️ Firebase Admin Init Error: Check if serviceAccountKey.json exists.", error);
+  }
 }
-const db = admin.firestore();
 
-// 2. INIT TWILIO (Added '!' here)
-const client = twilio(process.env.TWILIO_SID!, process.env.TWILIO_AUTH!);
+// Helper to get Firestore instance safely
+const getDb = () => {
+    return admin.apps.length ? admin.firestore() : null;
+};
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
-    const { deviceId, status } = body;
+    // 1. Parse Data from Frontend (or IoT Device)
+    const { to, type, patientName, extraData } = await request.json();
 
-    console.log(`[API] Received Alert: ${status}`);
+    console.log(`[API] Processing Alert: ${type} for ${patientName}`);
 
-    const taskTwilio = client.messages.create({
-        body: `🚨 CAREBRIDGE: ${status}\nDevice: ${deviceId}`,
-        // FIXED: Added '!' to enforce string type
-        from: process.env.TWILIO_FROM!,
-        to: process.env.TWILIO_TO!,
-    }).catch(e => console.error("Twilio Error:", e));
+    // 2. Validate Inputs
+    if (!to || !type || !patientName) {
+      return NextResponse.json(
+        { success: false, error: 'Missing required fields: to, type, or patientName' }, 
+        { status: 400 }
+      );
+    }
 
-    const taskFirebase = db.collection('alerts').add({
-        status: status,
-        device: deviceId,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        severity: 'HIGH',
-    }).catch(e => console.error("Firebase Error:", e));
+    // 3. Select the Correct WhatsApp Template
+    // The order of 'parameters' MUST match your Meta Dashboard template variables {{1}}, {{2}}, etc.
+    let templateName = "";
+    let parameters = [];
+    const currentTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
 
-    await Promise.all([taskTwilio, taskFirebase]);
+    switch (type) {
+      case 'FALL':
+        templateName = "fall_detected_alert";
+        parameters = [
+          { type: "text", text: patientName },           // {{patient_name}}
+          { type: "text", text: currentTime },           // {{time}}
+          { type: "text", text: extraData || "Home" }    // {{location}}
+        ];
+        break;
 
-    return NextResponse.json({ success: true, mode: 'Server-Relay' }, { status: 200 });
+      case 'SOS':
+        templateName = "sos_emergency_alert";
+        parameters = [
+          { type: "text", text: patientName },           
+          { type: "text", text: currentTime },           
+          { type: "text", text: extraData || "Unknown Location" } 
+        ];
+        break;
 
-  } catch (error: any) {
+      case 'MEDS':
+        templateName = "medication_reminder";
+        parameters = [
+          { type: "text", text: patientName },           
+          { type: "text", text: extraData }              // Medicine Details
+        ];
+        break;
+
+     default:
+        // Fallback for custom reminders
+        templateName = "carebridge_alert"; 
+        parameters = [
+          { type: "text", text: patientName },
+          { type: "text", text: extraData || "Please check the app." }
+        ];
+    }
+
+    // 4. PREPARE: Send WhatsApp via Meta Cloud API
+    const metaPromise = fetch(
+      `https://graph.facebook.com/v22.0/${process.env.META_PHONE_ID}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.META_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to: to.replace(/\D/g, ''), // Formatting: Remove '+' and spaces
+          type: "template",
+          template: {
+            name: templateName,
+            language: { code: "en_US" },
+            components: [{ type: "body", parameters }]
+          }
+        }),
+      }
+    ).then(res => res.json());
+
+    // 5. PREPARE: Save Log to Firebase
+    const db = getDb();
+    let firebasePromise: Promise<any> = Promise.resolve();
+
+    if (db) {
+        firebasePromise = db.collection('alerts').add({
+            status: type,               // e.g., 'FALL', 'SOS'
+            patient: patientName,
+            details: extraData || "",
+            contact: to,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            severity: (type === 'FALL' || type === 'SOS') ? 'HIGH' : 'LOW',
+            channel: 'WhatsApp'
+        });
+    }
+
+    // 6. EXECUTE BOTH (Parallel Execution for Speed)
+    const [metaResult] = await Promise.all([metaPromise, firebasePromise]);
+
+    // 7. Check Meta Response for Errors
+    if (metaResult.error) {
+        console.error("Meta API Error:", metaResult.error);
+        return NextResponse.json({ success: false, error: metaResult.error.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true, messageId: metaResult.messages?.[0]?.id }, { status: 200 });
+
+  } catch (error: unknown) {
     console.error('Server Error:', error);
-    return NextResponse.json({ success: false }, { status: 500 });
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 });
   }
 }
