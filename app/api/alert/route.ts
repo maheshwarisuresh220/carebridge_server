@@ -34,15 +34,14 @@ export async function POST(request: Request) {
     }
 
     // 3. Select the Correct WhatsApp Template
-    // The order of 'parameters' MUST match your Meta Dashboard template variables {{1}}, {{2}}, etc.
     let templateName = "";
     let parameters = [];
     const currentTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
 
     switch (type) {
       case 'FALL':
-        // Ensure this name matches EXACTLY with your Meta Dashboard
-        templateName = "fall_detected_alert"; 
+        // MATCHED TO SCREENSHOT: "fall_detection"
+        templateName = "fall_detection"; 
         parameters = [
           { type: "text", text: patientName },           // {{1}} Patient Name
           { type: "text", text: currentTime },           // {{2}} Time
@@ -51,6 +50,7 @@ export async function POST(request: Request) {
         break;
 
       case 'SOS':
+        // MATCHED TO SCREENSHOT: "sos_emergency_alert"
         templateName = "sos_emergency_alert";
         parameters = [
           { type: "text", text: patientName },           // {{1}} Patient Name
@@ -68,8 +68,8 @@ export async function POST(request: Request) {
         break;
 
       default:
-        // Fallback if an unknown type is sent
-        templateName = "carebridge_alert"; // Ensure you have a generic template or reuse one
+        // Fallback
+        templateName = "carebridge_alert"; 
         parameters = [
           { type: "text", text: patientName },
           { type: "text", text: extraData || "Please check the app." }
@@ -87,11 +87,12 @@ export async function POST(request: Request) {
         },
         body: JSON.stringify({
           messaging_product: "whatsapp",
-          to: to.replace(/\D/g, ''), // Formatting: Remove '+' and spaces
+          to: to.replace(/\D/g, ''), // Remove '+' and spaces
           type: "template",
           template: {
             name: templateName,
-            language: { code: "en_US" },
+            // ⚠️ CRITICAL FIX: Changed "en_US" to "en" to match your Dashboard
+            language: { code: "en" },
             components: [{ type: "body", parameters }]
           }
         }),
@@ -104,7 +105,7 @@ export async function POST(request: Request) {
 
     if (db) {
         firebasePromise = db.collection('alerts').add({
-            status: type,               // e.g., 'FALL', 'SOS'
+            status: type,
             patient: patientName,
             details: extraData || "",
             contact: to,
