@@ -2,81 +2,61 @@ import { NextResponse } from 'next/server';
 import * as admin from 'firebase-admin';
 import serviceAccountKey from '@/serviceAccountKey.json';
 
-// --- 1. INITIALIZE FIREBASE ADMIN (Server-Side) ---
+// 1. INITIALIZE FIREBASE
 if (!admin.apps.length) {
   try {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccountKey as admin.ServiceAccount),
     });
   } catch (error) {
-    console.error("⚠️ Firebase Admin Init Error: Check if serviceAccountKey.json exists.", error);
+    console.error("Firebase Init Error:", error);
   }
 }
 
-// Helper to get Firestore instance safely
-const getDb = () => {
-    return admin.apps.length ? admin.firestore() : null;
-};
+const getDb = () => { return admin.apps.length ? admin.firestore() : null; };
 
 export async function POST(request: Request) {
   try {
-    // 1. Parse Data from Frontend
     const { to, type, patientName, extraData } = await request.json();
 
-    console.log(`[API] Processing Alert: ${type} for ${patientName}`);
+    console.log(`[API] Processing Alert: ${type} from ${patientName}`);
 
-    // 2. Validate Inputs
     if (!to || !type || !patientName) {
-      return NextResponse.json(
-        { success: false, error: 'Missing required fields: to, type, or patientName' }, 
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
     }
 
-    // 3. Select the Correct WhatsApp Template
+    // --- TEMPLATE LOGIC ---
     let templateName = "";
     let parameters = [];
+    
+    // Get time in a clean format
     const currentTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
 
     switch (type) {
-      case 'FALL':
-        // MATCHED TO SCREENSHOT: "fall_detection"
-        templateName = "fall_detection"; 
+      case 'SOS':
+        templateName = "sos_emergency_alert";
         parameters = [
-          { type: "text", text: patientName },           // {{1}} Patient Name
+          { type: "text", text: patientName },           // {{1}} Name
+          { type: "text", text: currentTime },           // {{2}} Time
+          { type: "text", text: extraData || "Unknown" } // {{3}} Location/Details
+        ];
+        break;
+
+      case 'FALL':
+        templateName = "fall_detection";
+        parameters = [
+          { type: "text", text: patientName },           // {{1}} Name
           { type: "text", text: currentTime },           // {{2}} Time
           { type: "text", text: extraData || "Home" }    // {{3}} Location
         ];
         break;
 
-      case 'SOS':
-        // MATCHED TO SCREENSHOT: "sos_emergency_alert"
-        templateName = "sos_emergency_alert";
-        parameters = [
-          { type: "text", text: patientName },           // {{1}} Patient Name
-          { type: "text", text: currentTime },           // {{2}} Time
-          { type: "text", text: extraData || "Unknown Location" } // {{3}} Location
-        ];
-        break;
-
-      case 'MEDS':
-        templateName = "medication_reminder";
-        parameters = [
-          { type: "text", text: patientName },           // {{1}} Patient Name
-          { type: "text", text: extraData || "Your Medicine" } // {{2}} Medicine Details
-        ];
-        break;
-
       default:
-        // Fallback
-        templateName = "carebridge_alert"; 
-        parameters = [
-          { type: "text", text: patientName },
-          { type: "text", text: extraData || "Please check the app." }
-        ];
+        templateName = "carebridge_alert"; // Ensure this exists if used
+        parameters = [{ type: "text", text: patientName }];
     }
 
-    // 4. PREPARE: Send WhatsApp via Meta Cloud API
+    // --- SEND TO META ---
     const metaPromise = fetch(
       `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
       {
@@ -87,48 +67,44 @@ export async function POST(request: Request) {
         },
         body: JSON.stringify({
           messaging_product: "whatsapp",
-          to: to.replace(/\D/g, ''), // Remove '+' and spaces
+          to: to.replace(/\D/g, ''),
           type: "template",
           template: {
             name: templateName,
-            // ⚠️ CRITICAL FIX: Changed "en_US" to "en" to match your Dashboard
-            language: { code: "en" },
+            language: { code: "en" }, // Must match Dashboard language
             components: [{ type: "body", parameters }]
           }
         }),
       }
     ).then(res => res.json());
 
-    // 5. PREPARE: Save Log to Firebase
+    // --- SAVE TO FIREBASE ---
     const db = getDb();
-    let firebasePromise: Promise<any> = Promise.resolve();
-
     if (db) {
-        firebasePromise = db.collection('alerts').add({
+        // We do NOT wait for this to finish to speed up the API response
+        db.collection('alerts').add({
             status: type,
             patient: patientName,
             details: extraData || "",
             contact: to,
             timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            severity: (type === 'FALL' || type === 'SOS') ? 'HIGH' : 'LOW',
+            severity: 'HIGH',
             channel: 'WhatsApp'
-        });
+        }).catch(err => console.error("Firebase Save Error:", err));
     }
 
-    // 6. EXECUTE BOTH
-    const [metaResult] = await Promise.all([metaPromise, firebasePromise]);
+    const metaResult = await metaPromise;
 
-    // 7. Check Meta Response for Errors
     if (metaResult.error) {
         console.error("Meta API Error:", metaResult.error);
+        // Return 500 but still include the error message for debugging
         return NextResponse.json({ success: false, error: metaResult.error.message }, { status: 500 });
     }
 
     return NextResponse.json({ success: true, messageId: metaResult.messages?.[0]?.id }, { status: 200 });
 
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error('Server Error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 });
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
