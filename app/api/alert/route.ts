@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import * as admin from 'firebase-admin';
 import serviceAccountKey from '@/serviceAccountKey.json';
 
-// Initialize Firebase Admin
+// Initialize Firebase
 if (!admin.apps.length) {
   try {
     admin.initializeApp({
@@ -13,80 +13,60 @@ if (!admin.apps.length) {
   }
 }
 
-const getDb = () => {
-  return admin.apps.length ? admin.firestore() : null;
-};
+const getDb = () => { return admin.apps.length ? admin.firestore() : null; };
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { to, type, patientName, location } = body;
+    // ⚠️ SAFTEY: Extract both 'location' AND 'extraData' to be safe
+    const { to, type, patientName, location, extraData } = body;
 
     console.log(`[API] Processing Alert: ${type} from ${patientName}`);
 
-    // Validate required fields
-    if (!to || !type || !patientName) {
-      return NextResponse.json(
-        { success: false, error: 'Missing required fields' },
-        { status: 400 }
-      );
+    // Validate inputs
+    if (!to || !type) {
+      return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
     }
 
-    // Format time to match your template preview (14:50 format)
-    const now = new Date();
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const currentTime = `${hours}:${minutes}`;
+    // Determine the safe values (Never send Null/Undefined to Meta)
+    const safeName = String(patientName || "Patient");
+    const safeLocation = String(location || extraData || "Home"); // Checks both!
+    const currentTime = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 
-    // Determine template name
+    // --- TEMPLATE LOGIC ---
     let templateName = "";
+    let parameters = [];
     
-    if (type === 'SOS') {
-      templateName = "sos_emergency_alert";
-    } else if (type === 'FALL') {
-      templateName = "fall_detection";
-    } else {
-      return NextResponse.json(
-        { success: false, error: 'Invalid alert type' },
-        { status: 400 }
-      );
+    switch (type) {
+      case 'SOS':
+        templateName = "sos_emergency_alert";
+        parameters = [
+          { type: "text", text: safeName },      // {{1}}
+          { type: "text", text: currentTime },   // {{2}}
+          { type: "text", text: safeLocation }   // {{3}}
+        ];
+        break;
+
+      case 'FALL':
+        templateName = "fall_detection";
+        parameters = [
+          { type: "text", text: safeName },      // {{1}}
+          { type: "text", text: currentTime },   // {{2}}
+          { type: "text", text: safeLocation }   // {{3}}
+        ];
+        break;
+        
+      default:
+        // Fallback for testing
+        templateName = "sos_emergency_alert";
+        parameters = [
+          { type: "text", text: safeName },
+          { type: "text", text: currentTime },
+          { type: "text", text: safeLocation }
+        ];
     }
 
-    // Build WhatsApp message payload - parameters in ORDER only
-    const messagePayload = {
-      messaging_product: "whatsapp",
-      to: to.replace(/\D/g, ''),
-      type: "template",
-      template: {
-        name: templateName,
-        language: {
-          code: "en"
-        },
-        components: [
-          {
-            type: "body",
-            parameters: [
-              {
-                type: "text",
-                text: patientName
-              },
-              {
-                type: "text",
-                text: currentTime
-              },
-              {
-                type: "text",
-                text: location || "Home"
-              }
-            ]
-          }
-        ]
-      }
-    };
-
-    console.log('[DEBUG] Sending to Meta:', JSON.stringify(messagePayload, null, 2));
-
-    // Send to WhatsApp
+    // --- SEND TO META ---
     const metaResponse = await fetch(
       `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
       {
@@ -95,58 +75,49 @@ export async function POST(request: Request) {
           'Authorization': `Bearer ${process.env.WHATSAPP_ACCESS_TOKEN}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(messagePayload),
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to: to.replace(/\D/g, ''),
+          type: "template",
+          template: {
+            name: templateName,
+            language: { code: "en" }, // Matches your English template
+            components: [
+              {
+                type: "body",
+                parameters: parameters
+              }
+            ]
+          }
+        }),
       }
     );
 
     const metaResult = await metaResponse.json();
-    console.log('[DEBUG] Meta response:', JSON.stringify(metaResult, null, 2));
 
-    // Save to Firebase (don't wait for it)
+    // --- LOG TO FIREBASE ---
     const db = getDb();
     if (db) {
-      db.collection('alerts').add({
-        status: type,
-        patient: patientName,
-        details: location || "",
-        contact: to,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        severity: 'HIGH',
-        channel: 'WhatsApp'
-      }).catch(err => console.error("Firebase Save Error:", err));
+        db.collection('alerts').add({
+            status: type,
+            patient: safeName,
+            details: safeLocation,
+            contact: to,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            severity: 'HIGH',
+            channel: 'WhatsApp'
+        });
     }
 
-    // Check for Meta API errors
     if (metaResult.error) {
-      console.error("Meta API Error:", metaResult.error);
-      return NextResponse.json(
-        {
-          success: false,
-          error: metaResult.error.message || 'WhatsApp API Error',
-          errorDetails: metaResult.error
-        },
-        { status: 500 }
-      );
+        console.error("Meta API Error:", JSON.stringify(metaResult.error));
+        return NextResponse.json({ success: false, error: metaResult.error.message }, { status: 500 });
     }
 
-    // Success
-    return NextResponse.json(
-      {
-        success: true,
-        messageId: metaResult.messages?.[0]?.id
-      },
-      { status: 200 }
-    );
+    return NextResponse.json({ success: true, messageId: metaResult.messages?.[0]?.id }, { status: 200 });
 
-  } catch (error: unknown) {
+  } catch (error: any) {
     console.error('Server Error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json(
-      {
-        success: false,
-        error: errorMessage
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
