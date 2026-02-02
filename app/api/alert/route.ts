@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import * as admin from 'firebase-admin';
 import serviceAccountKey from '@/serviceAccountKey.json';
 
+// Initialize Firebase Admin
 if (!admin.apps.length) {
   try {
     admin.initializeApp({
@@ -12,91 +13,80 @@ if (!admin.apps.length) {
   }
 }
 
-const getDb = () => { return admin.apps.length ? admin.firestore() : null; };
+const getDb = () => {
+  return admin.apps.length ? admin.firestore() : null;
+};
 
 export async function POST(request: Request) {
   try {
-    const { to, type, patientName, location } = await request.json();
+    const body = await request.json();
+    const { to, type, patientName, location } = body;
 
     console.log(`[API] Processing Alert: ${type} from ${patientName}`);
 
+    // Validate required fields
     if (!to || !type || !patientName) {
-      return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
+      return NextResponse.json(
+        { success: false, error: 'Missing required fields' },
+        { status: 400 }
+      );
     }
 
-    // Format time to match template preview (HH:MM in 24-hour format)
+    // Format time
     const now = new Date();
     const hours = String(now.getHours()).padStart(2, '0');
     const minutes = String(now.getMinutes()).padStart(2, '0');
     const currentTime = `${hours}:${minutes}`;
 
+    // Determine template name
     let templateName = "";
-    let components = [];
     
     if (type === 'SOS') {
       templateName = "sos_emergency_alert";
-      
-      // Parameters must be in the EXACT order they appear in the template
-      // {{patient_name}} → parameter index 0
-      // {{time}} → parameter index 1  
-      // {{location}} → parameter index 2
-      components = [
-        {
-          type: "body",
-          parameters: [
-            {
-              type: "text",
-              text: patientName
-            },
-            {
-              type: "text",
-              text: currentTime
-            },
-            {
-              type: "text",
-              text: location || "Home"
-            }
-          ]
-        }
-      ];
     } else if (type === 'FALL') {
       templateName = "fall_detection";
-      components = [
-        {
-          type: "body",
-          parameters: [
-            {
-              type: "text",
-              text: patientName
-            },
-            {
-              type: "text",
-              text: currentTime
-            },
-            {
-              type: "text",
-              text: location || "Home"
-            }
-          ]
-        }
-      ];
+    } else {
+      return NextResponse.json(
+        { success: false, error: 'Invalid alert type' },
+        { status: 400 }
+      );
     }
 
+    // Build WhatsApp message payload
     const messagePayload = {
       messaging_product: "whatsapp",
-      to: to.replace(/\D/g, ''), // Remove non-digits from phone number
+      to: to.replace(/\D/g, ''),
       type: "template",
       template: {
         name: templateName,
         language: {
           code: "en"
         },
-        components: components
+        components: [
+          {
+            type: "body",
+            parameters: [
+              {
+                type: "text",
+                text: patientName
+              },
+              {
+                type: "text",
+                text: currentTime
+              },
+              {
+                type: "text",
+                text: location || "Home"
+              }
+            ]
+          }
+        ]
       }
     };
 
     console.log('[DEBUG] Sending to Meta:', JSON.stringify(messagePayload, null, 2));
 
+    // Send to WhatsApp
     const metaResponse = await fetch(
       `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
       {
@@ -112,7 +102,7 @@ export async function POST(request: Request) {
     const metaResult = await metaResponse.json();
     console.log('[DEBUG] Meta response:', JSON.stringify(metaResult, null, 2));
 
-    // Save to Firebase asynchronously
+    // Save to Firebase (don't wait for it)
     const db = getDb();
     if (db) {
       db.collection('alerts').add({
@@ -126,25 +116,37 @@ export async function POST(request: Request) {
       }).catch(err => console.error("Firebase Save Error:", err));
     }
 
+    // Check for Meta API errors
     if (metaResult.error) {
       console.error("Meta API Error:", metaResult.error);
-      return NextResponse.json({ 
-        success: false, 
-        error: metaResult.error.message || 'WhatsApp API Error',
-        errorDetails: metaResult.error
-      }, { status: 500 });
+      return NextResponse.json(
+        {
+          success: false,
+          error: metaResult.error.message || 'WhatsApp API Error',
+          errorDetails: metaResult.error
+        },
+        { status: 500 }
+      );
     }
 
-    return NextResponse.json({ 
-      success: true, 
-      messageId: metaResult.messages?.[0]?.id 
-    }, { status: 200 });
+    // Success
+    return NextResponse.json(
+      {
+        success: true,
+        messageId: metaResult.messages?.[0]?.id
+      },
+      { status: 200 }
+    );
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Server Error:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: error.message 
-    }, { status: 500 });
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json(
+      {
+        success: false,
+        error: errorMessage
+      },
+      { status: 500 }
+    );
   }
 }
