@@ -30,16 +30,23 @@ export async function POST(request: Request) {
       hour12: false 
     });
 
-    // ⚠️ CRITICAL: Use EXACT template name from WhatsApp Manager
-    // Based on your screenshot, it appears to be "sos_alert" (lowercase with underscore)
-    // Check your WhatsApp Manager for the exact template name
-    const templateName = type === 'SOS' ? "sos_alert" : "fall_detection";
+    // ✅ CORRECT TEMPLATE NAMES
+    let templateName = "";
+    
+    if (type === 'SOS') {
+      templateName = "sos_emergency_alert"; // ✅ Confirmed from your WhatsApp Manager
+    } else if (type === 'FALL') {
+      templateName = "fall_detection"; // ← Make sure this matches your Fall template name too
+    }
     
     const parameters = [
       { type: "text", text: patientName },
       { type: "text", text: currentTime },
       { type: "text", text: location || "Home" }
     ];
+
+    console.log(`[DEBUG] Using template: ${templateName}`);
+    console.log(`[DEBUG] Parameters:`, JSON.stringify(parameters));
 
     const metaPromise = fetch(
       `https://graph.facebook.com/v22.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
@@ -84,7 +91,11 @@ export async function POST(request: Request) {
 
     if (metaResult.error) {
       console.error("Meta API Error:", metaResult.error);
-      return NextResponse.json({ success: false, error: metaResult.error.message }, { status: 500 });
+      return NextResponse.json({ 
+        success: false, 
+        error: metaResult.error.message,
+        debug: { templateName, parameters }
+      }, { status: 500 });
     }
 
     return NextResponse.json({ success: true, messageId: metaResult.messages?.[0]?.id }, { status: 200 });
