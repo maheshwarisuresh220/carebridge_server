@@ -32,7 +32,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // Format time
+    // Format time to match your template preview (14:50 format)
     const now = new Date();
     const hours = String(now.getHours()).padStart(2, '0');
     const minutes = String(now.getMinutes()).padStart(2, '0');
@@ -52,7 +52,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // Build WhatsApp message payload with NAMED parameters
+    // Build WhatsApp message payload - parameters in ORDER only
     const messagePayload = {
       messaging_product: "whatsapp",
       to: to.replace(/\D/g, ''),
@@ -68,18 +68,15 @@ export async function POST(request: Request) {
             parameters: [
               {
                 type: "text",
-                text: patientName,
-                name: "patient_name"  // ✅ Added parameter name
+                text: patientName
               },
               {
                 type: "text",
-                text: currentTime,
-                name: "time"  // ✅ Added parameter name
+                text: currentTime
               },
               {
                 type: "text",
-                text: location || "Home",
-                name: "location"  // ✅ Added parameter name
+                text: location || "Home"
               }
             ]
           }
