@@ -52,7 +52,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // Build WhatsApp message payload
+    // Build WhatsApp message payload with NAMED parameters
     const messagePayload = {
       messaging_product: "whatsapp",
       to: to.replace(/\D/g, ''),
@@ -68,15 +68,18 @@ export async function POST(request: Request) {
             parameters: [
               {
                 type: "text",
-                text: patientName
+                text: patientName,
+                name: "patient_name"  // ✅ Added parameter name
               },
               {
                 type: "text",
-                text: currentTime
+                text: currentTime,
+                name: "time"  // ✅ Added parameter name
               },
               {
                 type: "text",
-                text: location || "Home"
+                text: location || "Home",
+                name: "location"  // ✅ Added parameter name
               }
             ]
           }
